@@ -211,7 +211,7 @@ const plans: Plan[] = [
         name: "Insert a top-layer at slot 5",
         correctOptions: [
           {
-            text: "Insert a pink piece to slot 5 of the yellow piece",
+            text: "Insert a green piece to slot 5 of the yellow piece",
             audioSrc:
               "/audio/yellow-piece-assembly/step06_main_red_slot5.mp3",
           },
@@ -235,7 +235,7 @@ const plans: Plan[] = [
         ],
         incorrectOptions: [
           {
-            text: "Insert a blue piece (back) on the right side",
+            text: "Insert a blue piece on the right side",
             audioSrc:
               "/audio/yellow-piece-assembly/step07_main_black_back_right.mp3",
           },
