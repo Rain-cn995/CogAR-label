@@ -95,6 +95,10 @@ function findTimestampColumn(headers: string[]) {
   return partial >= 0 ? partial : 0;
 }
 
+function quoteCsv(value: string) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -109,6 +113,7 @@ export default function Home() {
   const [csvName, setCsvName] = useState("");
   const [timestampColumn, setTimestampColumn] = useState(0);
   const [activeRow, setActiveRow] = useState<number | null>(null);
+  const [timestampOverrides, setTimestampOverrides] = useState<Record<number, number>>({});
   const [dragging, setDragging] = useState<"video" | "csv" | null>(null);
 
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
@@ -116,9 +121,11 @@ export default function Home() {
   const records = useMemo<CsvRecord[]>(() => {
     const timeHeader = headers[timestampColumn] ?? "";
     const firstAbsolute = rawRows.map((row) => getAbsoluteTimestamp(row[timestampColumn] ?? "", timeHeader)).find((value) => value !== null) ?? null;
-    return rawRows.map((values, id) => ({ id, values, seconds: parseTimestamp(values[timestampColumn] ?? "", firstAbsolute, timeHeader) }));
-  }, [headers, rawRows, timestampColumn]);
+    return rawRows.map((values, id) => ({ id, values, seconds: timestampOverrides[id] ?? parseTimestamp(values[timestampColumn] ?? "", firstAbsolute, timeHeader) }));
+  }, [headers, rawRows, timestampColumn, timestampOverrides]);
   const validRecordCount = records.filter((record) => record.seconds !== null).length;
+  const activeRecord = activeRow === null ? null : records[activeRow] ?? null;
+  const editorMaximum = Math.max(duration, ...records.map((record) => record.seconds ?? 0), 60);
 
   const loadVideo = (file?: File) => {
     if (!file || !file.type.startsWith("video/")) return;
@@ -129,13 +136,46 @@ export default function Home() {
   const loadCsv = async (file?: File) => {
     if (!file) return;
     const parsed = parseCsv(await file.text());
-    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null);
+    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({});
   };
 
   const jumpTo = (record: CsvRecord) => {
     if (record.seconds === null || !videoRef.current) return;
     const target = Math.max(0, Math.min(record.seconds, duration || record.seconds));
     videoRef.current.currentTime = target; setCurrentTime(target); setActiveRow(record.id); videoRef.current.focus();
+  };
+
+  const updateTimestamp = (rowId: number, nextSeconds: number) => {
+    const safe = Math.max(0, Math.min(Number.isFinite(nextSeconds) ? nextSeconds : 0, editorMaximum));
+    setTimestampOverrides((current) => ({ ...current, [rowId]: Math.round(safe * 1000) / 1000 }));
+    setActiveRow(rowId);
+    if (videoRef.current) {
+      videoRef.current.currentTime = safe;
+      setCurrentTime(safe);
+    }
+  };
+
+  const resetTimestamp = (rowId: number) => {
+    setTimestampOverrides((current) => {
+      const next = { ...current };
+      delete next[rowId];
+      return next;
+    });
+  };
+
+  const exportCsv = () => {
+    const rows = rawRows.map((row, rowId) => row.map((cell, columnId) =>
+      columnId === timestampColumn && timestampOverrides[rowId] !== undefined
+        ? formatTime(timestampOverrides[rowId])
+        : cell,
+    ));
+    const content = [headers, ...rows].map((row) => row.map((cell) => quoteCsv(cell ?? "")).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${csvName.replace(/\.csv$/i, "") || "timestamps"}-edited.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleDrop = (event: DragEvent, kind: "video" | "csv") => {
@@ -145,7 +185,7 @@ export default function Home() {
   };
 
   const resetAll = () => {
-    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null);
+    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({});
   };
 
   return (
@@ -178,9 +218,26 @@ export default function Home() {
               <button type="button" onClick={() => csvInputRef.current?.click()}><span className="upload-symbol">↥</span><strong>Upload your CSV</strong><small>Timestamp column is detected automatically</small></button>
             </div>
           ) : (
-            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button></div>
+            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            {activeRecord && activeRecord.seconds !== null ? (
+              <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
+                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified timestamp" : "Timestamp editor"}</strong></div><output>{formatTime(activeRecord.seconds)}</output></div>
+                <input className="time-slider" type="range" min="0" max={editorMaximum} step="0.01" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Timestamp position" />
+                <div className="editor-controls">
+                  <div className="nudge-buttons" aria-label="Fine timestamp adjustment">
+                    <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! - 1)}>−1s</button>
+                    <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! - 0.1)}>−0.1s</button>
+                    <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! + 0.1)}>+0.1s</button>
+                    <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! + 1)}>+1s</button>
+                  </div>
+                  <label>SECONDS<input type="number" min="0" max={editorMaximum} step="0.01" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} /></label>
+                  <button className="use-current-button" type="button" onClick={() => updateTimestamp(activeRecord.id, currentTime)} disabled={!videoUrl}>Use video time</button>
+                  <button className="undo-time-button" type="button" onClick={() => resetTimestamp(activeRecord.id)} disabled={timestampOverrides[activeRecord.id] === undefined}>Undo</button>
+                </div>
+              </section>
+            ) : <div className="editor-placeholder">Click <b>✎</b> beside a timestamp to edit it with a slider and fine controls.</div>}
             <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : ""}>{header}</th>)}</tr></thead><tbody>
-              {records.map((record) => <tr key={record.id} className={activeRow === record.id ? "is-active" : ""}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl} title={videoUrl ? `Jump video to ${formatTime(record.seconds)}` : "Upload a video first"}><span>▶</span>{record.values[index] || formatTime(record.seconds)}</button> : (record.values[index] || "—")}</td>)}</tr>)}
+              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl} title={videoUrl ? `Jump video to ${formatTime(record.seconds)}` : "Upload a video first"}><span>▶</span>{timestampOverrides[record.id] !== undefined ? formatTime(record.seconds) : (record.values[index] || formatTime(record.seconds))}</button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
             </tbody></table></div></>
           )}
           <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
