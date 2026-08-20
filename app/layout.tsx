@@ -8,22 +8,22 @@ const siteOrigin =
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteOrigin),
-  title: "CogAR · Wizard of Oz Control Console",
+  title: "CogAR · Video Timestamp Review",
   description:
-    "A task-by-task operator console for AI audio cues, final-act timestamps, and reliance classification.",
+    "Review a video alongside CSV event data and jump to any recorded timestamp with one click.",
   icons: {
     icon: `${basePath}/favicon.svg`,
     shortcut: `${basePath}/favicon.svg`,
   },
   openGraph: {
     title: "CogAR",
-    description: "Wizard of Oz Control Console",
+    description: "Video and CSV timestamp review console",
     images: [`${basePath}/og.png`],
   },
   twitter: {
     card: "summary_large_image",
     title: "CogAR",
-    description: "Wizard of Oz Control Console",
+    description: "Video and CSV timestamp review console",
     images: [`${basePath}/og.png`],
   },
 };
