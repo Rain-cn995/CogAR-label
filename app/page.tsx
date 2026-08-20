@@ -62,23 +62,6 @@ function getAbsoluteTimestamp(raw: string, header: string) {
   return Number.isFinite(date) ? date / 1000 : null;
 }
 
-function parseTimestamp(raw: string, firstAbsolute: number | null, header: string) {
-  const value = raw.trim();
-  if (!value) return null;
-  if (/^\d{1,3}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(value)) {
-    const parts = value.split(":").map(Number);
-    return parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    const normalized = normalizeNumericTimestamp(numeric, header);
-    return firstAbsolute !== null && normalized > 1_000_000 ? normalized - firstAbsolute : normalized;
-  }
-  const date = Date.parse(value);
-  if (Number.isFinite(date)) return firstAbsolute === null ? 0 : date / 1000 - firstAbsolute;
-  return null;
-}
-
 function formatTime(seconds: number) {
   const safe = Math.max(0, seconds || 0);
   const hours = Math.floor(safe / 3600);
@@ -86,6 +69,10 @@ function formatTime(seconds: number) {
   const remainder = safe % 60;
   const secondText = remainder.toFixed(remainder % 1 ? 2 : 0).padStart(2, "0");
   return hours > 0 ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${secondText}` : `${String(minutes).padStart(2, "0")}:${secondText}`;
+}
+
+function formatIso(seconds: number) {
+  return new Date(seconds * 1000).toISOString();
 }
 
 function findTimestampColumn(headers: string[]) {
@@ -114,45 +101,123 @@ export default function Home() {
   const [timestampColumn, setTimestampColumn] = useState(0);
   const [activeRow, setActiveRow] = useState<number | null>(null);
   const [timestampOverrides, setTimestampOverrides] = useState<Record<number, number>>({});
+  const [videoStartSeconds, setVideoStartSeconds] = useState<number | null>(null);
+  const [videoStartText, setVideoStartText] = useState("");
+  const [videoStartSource, setVideoStartSource] = useState<"none" | "auto" | "manual">("none");
+  const [seekNotice, setSeekNotice] = useState("");
+  const [timestampDraft, setTimestampDraft] = useState("");
   const [dragging, setDragging] = useState<"video" | "csv" | null>(null);
 
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
 
-  const records = useMemo<CsvRecord[]>(() => {
+  const baseRecords = useMemo<CsvRecord[]>(() => {
     const timeHeader = headers[timestampColumn] ?? "";
-    const firstAbsolute = rawRows.map((row) => getAbsoluteTimestamp(row[timestampColumn] ?? "", timeHeader)).find((value) => value !== null) ?? null;
-    return rawRows.map((values, id) => ({ id, values, seconds: timestampOverrides[id] ?? parseTimestamp(values[timestampColumn] ?? "", firstAbsolute, timeHeader) }));
-  }, [headers, rawRows, timestampColumn, timestampOverrides]);
+    return rawRows.map((values, id) => ({ id, values, seconds: getAbsoluteTimestamp(values[timestampColumn] ?? "", timeHeader) }));
+  }, [headers, rawRows, timestampColumn]);
+  const records = useMemo<CsvRecord[]>(() => baseRecords.map((record) => ({
+    ...record,
+    seconds: timestampOverrides[record.id] ?? record.seconds,
+  })), [baseRecords, timestampOverrides]);
   const validRecordCount = records.filter((record) => record.seconds !== null).length;
   const activeRecord = activeRow === null ? null : records[activeRow] ?? null;
-  const editorMaximum = Math.max(duration, ...records.map((record) => record.seconds ?? 0), 60);
+  const editorMinimum = videoStartSeconds ?? activeRecord?.seconds ?? 0;
+  const editorMaximum = videoStartSeconds !== null ? videoStartSeconds + Math.max(duration, 1) : Math.max(...records.map((record) => record.seconds ?? 0), 1);
+
+  useEffect(() => {
+    setTimestampDraft(activeRecord && activeRecord.seconds !== null ? formatIso(activeRecord.seconds) : "");
+  }, [activeRecord, activeRow]);
+
+  useEffect(() => {
+    if (!videoName || !baseRecords.length || videoStartSource === "manual") return;
+    const ignored = new Set(["video", "recording", "compressed", "clip", "part", "mov", "mp4", "webm"]);
+    const tokens = videoName.toLowerCase().replace(/\.[^.]+$/, "").split(/[^a-z0-9]+/).filter((token) => token.length >= 3 && !ignored.has(token) && !/^p?\d+$/.test(token));
+    const match = baseRecords.find((record) => tokens.some((token) => record.values.some((value) => value.toLowerCase().includes(token))));
+    const start = match?.seconds ?? baseRecords.find((record) => record.seconds !== null)?.seconds ?? null;
+    if (start !== null) {
+      setVideoStartSeconds(start);
+      setVideoStartText(formatIso(start));
+      setVideoStartSource("auto");
+      setSeekNotice(`Video start set to ${formatIso(start)}`);
+    }
+  }, [baseRecords, videoName, videoStartSource]);
 
   const loadVideo = (file?: File) => {
     if (!file || !file.type.startsWith("video/")) return;
     setVideoUrl((current) => { if (current) URL.revokeObjectURL(current); return URL.createObjectURL(file); });
-    setVideoName(file.name); setVideoSize(file.size); setCurrentTime(0); setActiveRow(null);
+    setVideoName(file.name); setVideoSize(file.size); setCurrentTime(0); setActiveRow(null); setVideoStartSource("none"); setSeekNotice("");
   };
 
   const loadCsv = async (file?: File) => {
     if (!file) return;
     const parsed = parseCsv(await file.text());
-    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({});
+    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
   };
 
   const jumpTo = (record: CsvRecord) => {
     if (record.seconds === null || !videoRef.current) return;
-    const target = Math.max(0, Math.min(record.seconds, duration || record.seconds));
-    videoRef.current.currentTime = target; setCurrentTime(target); setActiveRow(record.id); videoRef.current.focus();
+    setActiveRow(record.id);
+    if (videoStartSeconds === null) {
+      setSeekNotice("Set the Video Start ISO before jumping");
+      return;
+    }
+    const videoSeconds = record.seconds - videoStartSeconds;
+    if (videoSeconds < 0 || (duration > 0 && videoSeconds > duration)) {
+      setSeekNotice(`Row ${record.id + 1} is outside this video · adjust Video Start ISO`);
+      return;
+    }
+    const video = videoRef.current;
+    const target = Math.max(0, Math.min(videoSeconds, duration > 0 ? Math.max(0, duration - 0.01) : videoSeconds));
+    const applySeek = () => {
+      video.currentTime = target;
+      setCurrentTime(target);
+      setSeekNotice(`Jumped to ${formatIso(record.seconds)} · row ${record.id + 1}`);
+      video.focus();
+    };
+    if (video.readyState === 0) video.addEventListener("loadedmetadata", applySeek, { once: true });
+    else applySeek();
+  };
+
+  const alignAllToCurrentTime = (rowId: number) => {
+    const standardSeconds = records[rowId]?.seconds;
+    if (standardSeconds === null || standardSeconds === undefined) return;
+    const start = standardSeconds - currentTime;
+    setVideoStartSeconds(start);
+    setVideoStartText(formatIso(start));
+    setVideoStartSource("manual");
+    setSeekNotice(`Video start set to ${formatIso(start)}`);
   };
 
   const updateTimestamp = (rowId: number, nextSeconds: number) => {
-    const safe = Math.max(0, Math.min(Number.isFinite(nextSeconds) ? nextSeconds : 0, editorMaximum));
+    const safe = Math.max(editorMinimum, Math.min(Number.isFinite(nextSeconds) ? nextSeconds : editorMinimum, editorMaximum));
     setTimestampOverrides((current) => ({ ...current, [rowId]: Math.round(safe * 1000) / 1000 }));
     setActiveRow(rowId);
-    if (videoRef.current) {
-      videoRef.current.currentTime = safe;
-      setCurrentTime(safe);
+    if (videoRef.current && videoStartSeconds !== null) {
+      const target = safe - videoStartSeconds;
+      videoRef.current.currentTime = target;
+      setCurrentTime(target);
     }
+  };
+
+  const applyVideoStartText = () => {
+    const parsed = getAbsoluteTimestamp(videoStartText, "event_timestamp_iso");
+    if (parsed === null) {
+      setSeekNotice("Video Start ISO is invalid");
+      return;
+    }
+    setVideoStartSeconds(parsed);
+    setVideoStartText(formatIso(parsed));
+    setVideoStartSource("manual");
+    setSeekNotice(`Video start set to ${formatIso(parsed)}`);
+  };
+
+  const applyTimestampDraft = (rowId: number) => {
+    const parsed = getAbsoluteTimestamp(timestampDraft, "event_timestamp_iso");
+    if (parsed === null) {
+      setSeekNotice("Standard timestamp is invalid");
+      return;
+    }
+    updateTimestamp(rowId, parsed);
+    setTimestampDraft(formatIso(parsed));
   };
 
   const resetTimestamp = (rowId: number) => {
@@ -166,7 +231,7 @@ export default function Home() {
   const exportCsv = () => {
     const rows = rawRows.map((row, rowId) => row.map((cell, columnId) =>
       columnId === timestampColumn && timestampOverrides[rowId] !== undefined
-        ? formatTime(timestampOverrides[rowId])
+        ? formatIso(timestampOverrides[rowId])
         : cell,
     ));
     const content = [headers, ...rows].map((row) => row.map((cell) => quoteCsv(cell ?? "")).join(",")).join("\n");
@@ -185,7 +250,7 @@ export default function Home() {
   };
 
   const resetAll = () => {
-    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({});
+    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
   };
 
   return (
@@ -203,10 +268,11 @@ export default function Home() {
 
       <section className="review-grid">
         <article className="video-panel">
-          <div className="panel-header"><div><span>01</span><div><strong>Recording</strong><small>{videoName || "No video selected"}</small></div></div><time>{formatTime(currentTime)} <i>/</i> {formatTime(duration)}</time></div>
+          <div className="panel-header"><div><span>01</span><div><strong>Recording</strong><small>{videoName || "No video selected"}</small></div></div><time>{videoStartSeconds !== null ? formatIso(videoStartSeconds + currentTime) : "SET VIDEO START ISO"}</time></div>
           <div className={`video-stage ${dragging === "video" ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging("video"); }} onDragLeave={() => setDragging(null)} onDrop={(event) => handleDrop(event, "video")}>
             {videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} /> :
               <button className="empty-stage" type="button" onClick={() => videoInputRef.current?.click()}><span className="upload-symbol">↑</span><strong>Upload your video</strong><small>Click to browse or drop MP4, MOV, WebM and more</small></button>}
+            {seekNotice && videoUrl ? <div className="seek-notice" role="status">{seekNotice}</div> : null}
           </div>
           <div className="video-footer"><label className="file-button">{videoUrl ? "Replace video" : "Choose video"}<input ref={videoInputRef} type="file" accept="video/*" onChange={(event: ChangeEvent<HTMLInputElement>) => loadVideo(event.target.files?.[0])} /></label><div className="file-meta"><strong>{videoName || "Waiting for recording"}</strong><small>{videoSize ? `${(videoSize / 1024 / 1024).toFixed(1)} MB · ${formatTime(duration)}` : "The video stays on this device"}</small></div></div>
         </article>
@@ -218,11 +284,12 @@ export default function Home() {
               <button type="button" onClick={() => csvInputRef.current?.click()}><span className="upload-symbol">↥</span><strong>Upload your CSV</strong><small>Timestamp column is detected automatically</small></button>
             </div>
           ) : (
-            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            <div className="video-clock-bar"><label>VIDEO START ISO<input type="text" value={videoStartText} onChange={(event) => setVideoStartText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyVideoStartText(); }} placeholder="2026-08-17T14:23:06.881Z" /></label><button type="button" onClick={applyVideoStartText}>Apply standard time</button><span>{videoStartSeconds !== null ? `Current video frame: ${formatIso(videoStartSeconds + currentTime)}` : "Enter the recording's standard start time"}</span></div>
             {activeRecord && activeRecord.seconds !== null ? (
               <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
-                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified timestamp" : "Timestamp editor"}</strong></div><output>{formatTime(activeRecord.seconds)}</output></div>
-                <input className="time-slider" type="range" min="0" max={editorMaximum} step="0.01" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Timestamp position" />
+                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><output>{formatIso(activeRecord.seconds)}</output></div>
+                <input className="time-slider" type="range" min={editorMinimum} max={editorMaximum} step="0.001" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Standard timestamp position" disabled={videoStartSeconds === null} />
                 <div className="editor-controls">
                   <div className="nudge-buttons" aria-label="Fine timestamp adjustment">
                     <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! - 1)}>−1s</button>
@@ -230,14 +297,15 @@ export default function Home() {
                     <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! + 0.1)}>+0.1s</button>
                     <button type="button" onClick={() => updateTimestamp(activeRecord.id, activeRecord.seconds! + 1)}>+1s</button>
                   </div>
-                  <label>SECONDS<input type="number" min="0" max={editorMaximum} step="0.01" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} /></label>
-                  <button className="use-current-button" type="button" onClick={() => updateTimestamp(activeRecord.id, currentTime)} disabled={!videoUrl}>Use video time</button>
+                  <label>STANDARD TIME ISO<input className="standard-time-input" type="text" value={timestampDraft} onChange={(event) => setTimestampDraft(event.target.value)} onBlur={() => applyTimestampDraft(activeRecord.id)} onKeyDown={(event) => { if (event.key === "Enter") applyTimestampDraft(activeRecord.id); }} /></label>
+                  <button className="use-current-button" type="button" onClick={() => videoStartSeconds !== null && updateTimestamp(activeRecord.id, videoStartSeconds + currentTime)} disabled={!videoUrl || videoStartSeconds === null}>Use video time</button>
+                  <button className="align-all-button" type="button" onClick={() => alignAllToCurrentTime(activeRecord.id)} disabled={!videoUrl}>Set as video clock</button>
                   <button className="undo-time-button" type="button" onClick={() => resetTimestamp(activeRecord.id)} disabled={timestampOverrides[activeRecord.id] === undefined}>Undo</button>
                 </div>
               </section>
             ) : <div className="editor-placeholder">Click <b>✎</b> beside a timestamp to edit it with a slider and fine controls.</div>}
             <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : ""}>{header}</th>)}</tr></thead><tbody>
-              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl} title={videoUrl ? `Jump video to ${formatTime(record.seconds)}` : "Upload a video first"}><span>▶</span>{timestampOverrides[record.id] !== undefined ? formatTime(record.seconds) : (record.values[index] || formatTime(record.seconds))}</button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
+              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span>▶</span>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
             </tbody></table></div></>
           )}
           <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
