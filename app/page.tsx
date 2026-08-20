@@ -75,6 +75,15 @@ function formatIso(seconds: number) {
   return new Date(seconds * 1000).toISOString();
 }
 
+function formatVideoTime(seconds: number) {
+  const sign = seconds < 0 ? "−" : "+";
+  const safe = Math.abs(seconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const remainder = (safe % 60).toFixed(3).padStart(6, "0");
+  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${remainder}`;
+}
+
 function findTimestampColumn(headers: string[]) {
   const normalized = headers.map((header) => header.trim().toLowerCase());
   for (const hint of TIMESTAMP_HINTS) { const exact = normalized.indexOf(hint); if (exact >= 0) return exact; }
@@ -268,7 +277,7 @@ export default function Home() {
 
       <section className="review-grid">
         <article className="video-panel">
-          <div className="panel-header"><div><span>01</span><div><strong>Recording</strong><small>{videoName || "No video selected"}</small></div></div><time>{videoStartSeconds !== null ? formatIso(videoStartSeconds + currentTime) : "SET VIDEO START ISO"}</time></div>
+          <div className="panel-header"><div><span>01</span><div><strong>Recording</strong><small>{videoName || "No video selected"}</small></div></div><time>{videoStartSeconds !== null ? <><span>{formatIso(videoStartSeconds + currentTime)}</span><small>VIDEO {formatVideoTime(currentTime)}</small></> : <span>SET VIDEO START ISO</span>}</time></div>
           <div className={`video-stage ${dragging === "video" ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging("video"); }} onDragLeave={() => setDragging(null)} onDrop={(event) => handleDrop(event, "video")}>
             {videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} /> :
               <button className="empty-stage" type="button" onClick={() => videoInputRef.current?.click()}><span className="upload-symbol">↑</span><strong>Upload your video</strong><small>Click to browse or drop MP4, MOV, WebM and more</small></button>}
@@ -288,7 +297,7 @@ export default function Home() {
             <div className="video-clock-bar"><label>VIDEO START ISO<input type="text" value={videoStartText} onChange={(event) => setVideoStartText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyVideoStartText(); }} placeholder="2026-08-17T14:23:06.881Z" /></label><button type="button" onClick={applyVideoStartText}>Apply standard time</button><span>{videoStartSeconds !== null ? `Current video frame: ${formatIso(videoStartSeconds + currentTime)}` : "Enter the recording's standard start time"}</span></div>
             {activeRecord && activeRecord.seconds !== null ? (
               <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
-                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><output>{formatIso(activeRecord.seconds)}</output></div>
+                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><div className="editor-output"><output>{formatIso(activeRecord.seconds)}</output><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(activeRecord.seconds - videoStartSeconds) : "—"}</small></div></div>
                 <input className="time-slider" type="range" min={editorMinimum} max={editorMaximum} step="0.001" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Standard timestamp position" disabled={videoStartSeconds === null} />
                 <div className="editor-controls">
                   <div className="nudge-buttons" aria-label="Fine timestamp adjustment">
@@ -305,7 +314,7 @@ export default function Home() {
               </section>
             ) : <div className="editor-placeholder">Click <b>✎</b> beside a timestamp to edit it with a slider and fine controls.</div>}
             <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : ""}>{header}</th>)}</tr></thead><tbody>
-              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span>▶</span>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
+              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
             </tbody></table></div></>
           )}
           <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
