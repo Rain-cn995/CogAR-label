@@ -127,8 +127,15 @@ export default function Home() {
     ...record,
     seconds: timestampOverrides[record.id] ?? record.seconds,
   })), [baseRecords, timestampOverrides]);
+  const sortedRecords = useMemo(() => [...records].sort((left, right) => {
+    if (left.seconds === null && right.seconds === null) return left.id - right.id;
+    if (left.seconds === null) return 1;
+    if (right.seconds === null) return -1;
+    return left.seconds - right.seconds || left.id - right.id;
+  }), [records]);
   const validRecordCount = records.filter((record) => record.seconds !== null).length;
   const activeRecord = activeRow === null ? null : records[activeRow] ?? null;
+  const activeRank = activeRow === null ? 0 : sortedRecords.findIndex((record) => record.id === activeRow) + 1;
   const editorMinimum = videoStartSeconds ?? activeRecord?.seconds ?? 0;
   const editorMaximum = videoStartSeconds !== null ? videoStartSeconds + Math.max(duration, 1) : Math.max(...records.map((record) => record.seconds ?? 0), 1);
 
@@ -238,9 +245,9 @@ export default function Home() {
   };
 
   const exportCsv = () => {
-    const rows = rawRows.map((row, rowId) => row.map((cell, columnId) =>
-      columnId === timestampColumn && timestampOverrides[rowId] !== undefined
-        ? formatIso(timestampOverrides[rowId])
+    const rows = sortedRecords.map((record) => rawRows[record.id].map((cell, columnId) =>
+      columnId === timestampColumn && timestampOverrides[record.id] !== undefined
+        ? formatIso(timestampOverrides[record.id])
         : cell,
     ));
     const content = [headers, ...rows].map((row) => row.map((cell) => quoteCsv(cell ?? "")).join(",")).join("\n");
@@ -293,11 +300,11 @@ export default function Home() {
               <button type="button" onClick={() => csvInputRef.current?.click()}><span className="upload-symbol">↥</span><strong>Upload your CSV</strong><small>Timestamp column is detected automatically</small></button>
             </div>
           ) : (
-            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><span className="sort-badge">STANDARD TIME ↑</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
             <div className="video-clock-bar"><label>VIDEO START ISO<input type="text" value={videoStartText} onChange={(event) => setVideoStartText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyVideoStartText(); }} placeholder="2026-08-17T14:23:06.881Z" /></label><button type="button" onClick={applyVideoStartText}>Apply standard time</button><span>{videoStartSeconds !== null ? `Current video frame: ${formatIso(videoStartSeconds + currentTime)}` : "Enter the recording's standard start time"}</span></div>
             {activeRecord && activeRecord.seconds !== null ? (
               <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
-                <div className="editor-heading"><div><span>EDIT ROW {String(activeRecord.id + 1).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><div className="editor-output"><output>{formatIso(activeRecord.seconds)}</output><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(activeRecord.seconds - videoStartSeconds) : "—"}</small></div></div>
+                <div className="editor-heading"><div><span>EDIT SORTED ROW {String(activeRank).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><div className="editor-output"><output>{formatIso(activeRecord.seconds)}</output><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(activeRecord.seconds - videoStartSeconds) : "—"}</small></div></div>
                 <input className="time-slider" type="range" min={editorMinimum} max={editorMaximum} step="0.001" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Standard timestamp position" disabled={videoStartSeconds === null} />
                 <div className="editor-controls">
                   <div className="nudge-buttons" aria-label="Fine timestamp adjustment">
@@ -314,7 +321,7 @@ export default function Home() {
               </section>
             ) : <div className="editor-placeholder">Click <b>✎</b> beside a timestamp to edit it with a slider and fine controls.</div>}
             <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : ""}>{header}</th>)}</tr></thead><tbody>
-              {records.map((record) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number">{String(record.id + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit timestamp for row ${record.id + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
+              {sortedRecords.map((record, sortedIndex) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number" title={`Original CSV row ${record.id + 1}`}>{String(sortedIndex + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit sorted row ${sortedIndex + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
             </tbody></table></div></>
           )}
           <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
