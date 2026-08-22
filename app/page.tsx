@@ -1,10 +1,26 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createCsvDraftKey,
+  createTimestampDraftAutosaver,
+  filterTimestampOverrides,
+  readTimestampDraft,
+  removeTimestampDraft,
+} from "./csv-draft.js";
 
 type CsvRecord = { id: number; values: string[]; seconds: number | null };
+type AutosaveStatus = "idle" | "restored" | "retained" | "saving" | "saved" | "error";
 
 const TIMESTAMP_HINTS = ["timestamp", "time_stamp", "video_time", "video timestamp", "elapsed", "elapsed_time", "start_time", "start", "time", "seconds", "sec"];
+const AUTOSAVE_COPY: Record<AutosaveStatus, string> = {
+  idle: "AUTOSAVE READY",
+  restored: "SAVED EDITS RESTORED",
+  retained: "PRIOR DRAFT RETAINED",
+  saving: "SAVING…",
+  saved: "SAVED LOCALLY",
+  error: "AUTOSAVE UNAVAILABLE",
+};
 
 function splitCsvLine(line: string, delimiter: string) {
   const cells: string[] = [];
@@ -99,6 +115,8 @@ export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
+  const draftAutosaverRef = useRef<ReturnType<typeof createTimestampDraftAutosaver> | null>(null);
+  const restoredDraftKeyRef = useRef("");
   const [videoUrl, setVideoUrl] = useState("");
   const [videoName, setVideoName] = useState("");
   const [videoSize, setVideoSize] = useState(0);
@@ -116,8 +134,43 @@ export default function Home() {
   const [seekNotice, setSeekNotice] = useState("");
   const [timestampDraft, setTimestampDraft] = useState("");
   const [dragging, setDragging] = useState<"video" | "csv" | null>(null);
+  const [draftKey, setDraftKey] = useState("");
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>("idle");
 
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let autosaver: ReturnType<typeof createTimestampDraftAutosaver>;
+    try {
+      autosaver = createTimestampDraftAutosaver(window.localStorage, {
+        onStatus: (status: AutosaveStatus) => setAutosaveStatus(status),
+      });
+    } catch {
+      const errorNotice = window.setTimeout(() => setAutosaveStatus("error"), 0);
+      return () => window.clearTimeout(errorNotice);
+    }
+    draftAutosaverRef.current = autosaver;
+    const flushPendingDraft = () => autosaver.flush();
+    window.addEventListener("pagehide", flushPendingDraft);
+    return () => {
+      window.removeEventListener("pagehide", flushPendingDraft);
+      autosaver.flush();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!draftKey || !draftAutosaverRef.current) return;
+    if (!Object.keys(timestampOverrides).length) {
+      draftAutosaverRef.current.cancel();
+      return;
+    }
+    if (restoredDraftKeyRef.current === draftKey) {
+      restoredDraftKeyRef.current = "";
+      return;
+    }
+    draftAutosaverRef.current.schedule(draftKey, { timestampColumn, timestampOverrides });
+  }, [draftKey, timestampColumn, timestampOverrides]);
 
   const baseRecords = useMemo<CsvRecord[]>(() => {
     const timeHeader = headers[timestampColumn] ?? "";
@@ -163,20 +216,51 @@ export default function Home() {
     setVideoName(file.name); setVideoSize(file.size); setCurrentTime(0); setActiveRow(null); setVideoStartSource("none"); setSeekNotice("");
   };
 
+  const flushPendingEdits = () => {
+    if (!Object.keys(timestampOverrides).length) return true;
+    const saved = draftAutosaverRef.current?.flush() ?? false;
+    if (!saved) {
+      setAutosaveStatus("error");
+      setSeekNotice("Latest timestamp edits could not be saved · keep this CSV open");
+    }
+    return saved;
+  };
+
   const loadCsv = async (file?: File) => {
     if (!file) return;
-    const parsed = parseCsv(await file.text());
-    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
+    if (!flushPendingEdits()) return;
+    const csvText = await file.text();
+    const parsed = parseCsv(csvText);
+    const nextDraftKey = createCsvDraftKey(file, csvText);
+    let restoredDraft = null;
+    let storageFailed = false;
+    try {
+      restoredDraft = readTimestampDraft(window.localStorage, nextDraftKey);
+    } catch {
+      storageFailed = true;
+    }
+    const canRestore = restoredDraft && restoredDraft.timestampColumn < parsed.headers.length;
+    const candidateOverrides = canRestore ? restoredDraft.timestampOverrides : {};
+    const filteredOverrides = filterTimestampOverrides(candidateOverrides, parsed.rows.length);
+    const draftWasTrimmed = Boolean(restoredDraft && !canRestore) || Object.keys(candidateOverrides).length !== Object.keys(filteredOverrides).length;
+    const restoredOverrides = draftWasTrimmed ? {} : filteredOverrides;
+    if (draftWasTrimmed) {
+      try { removeTimestampDraft(window.localStorage, nextDraftKey); }
+      catch { storageFailed = true; }
+    }
+    restoredDraftKeyRef.current = Object.keys(restoredOverrides).length && !draftWasTrimmed ? nextDraftKey : "";
+    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(canRestore ? restoredDraft.timestampColumn : findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides(restoredOverrides); setDraftKey(nextDraftKey); setAutosaveStatus(storageFailed || draftWasTrimmed ? "error" : Object.keys(restoredOverrides).length ? "restored" : "idle"); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice(draftWasTrimmed ? "Some saved edits were invalid and were not restored" : Object.keys(restoredOverrides).length ? `Restored ${Object.keys(restoredOverrides).length} saved timestamp edit${Object.keys(restoredOverrides).length === 1 ? "" : "s"}` : "");
   };
 
   const jumpTo = (record: CsvRecord) => {
     if (record.seconds === null || !videoRef.current) return;
+    const recordSeconds = record.seconds;
     setActiveRow(record.id);
     if (videoStartSeconds === null) {
       setSeekNotice("Set the Video Start ISO before jumping");
       return;
     }
-    const videoSeconds = record.seconds - videoStartSeconds;
+    const videoSeconds = recordSeconds - videoStartSeconds;
     if (videoSeconds < 0 || (duration > 0 && videoSeconds > duration)) {
       setSeekNotice(`Row ${record.id + 1} is outside this video · adjust Video Start ISO`);
       return;
@@ -186,7 +270,7 @@ export default function Home() {
     const applySeek = () => {
       video.currentTime = target;
       setCurrentTime(target);
-      setSeekNotice(`Jumped to ${formatIso(record.seconds)} · row ${record.id + 1}`);
+      setSeekNotice(`Jumped to ${formatIso(recordSeconds)} · row ${record.id + 1}`);
       video.focus();
     };
     if (video.readyState === 0) video.addEventListener("loadedmetadata", applySeek, { once: true });
@@ -236,12 +320,38 @@ export default function Home() {
     setTimestampDraft(formatIso(parsed));
   };
 
+  const clearSavedDraft = () => {
+    draftAutosaverRef.current?.cancel();
+    if (!draftKey) return true;
+    try {
+      removeTimestampDraft(window.localStorage, draftKey);
+      return true;
+    } catch {
+      setAutosaveStatus("error");
+      return false;
+    }
+  };
+
   const resetTimestamp = (rowId: number) => {
-    setTimestampOverrides((current) => {
-      const next = { ...current };
-      delete next[rowId];
-      return next;
-    });
+    const next = { ...timestampOverrides };
+    delete next[rowId];
+    if (!Object.keys(next).length && !clearSavedDraft()) return;
+    setTimestampOverrides(next);
+    if (!Object.keys(next).length) setAutosaveStatus("idle");
+  };
+
+  const discardSavedEdits = () => {
+    if (clearSavedDraft()) {
+      setTimestampOverrides({});
+      setAutosaveStatus("idle");
+      setSeekNotice("Discarded all saved timestamp edits");
+    }
+  };
+
+  const changeTimestampColumn = (column: number) => {
+    const hadEdits = Object.keys(timestampOverrides).length > 0;
+    if (!flushPendingEdits()) return;
+    setTimestampColumn(column); setActiveRow(null); setTimestampOverrides({}); setAutosaveStatus(hadEdits ? "retained" : "idle"); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none");
   };
 
   const exportCsv = () => {
@@ -266,7 +376,8 @@ export default function Home() {
   };
 
   const resetAll = () => {
-    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
+    if (!flushPendingEdits()) return;
+    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({}); setDraftKey(""); setAutosaveStatus("idle"); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
   };
 
   return (
@@ -300,7 +411,7 @@ export default function Home() {
               <button type="button" onClick={() => csvInputRef.current?.click()}><span className="upload-symbol">↥</span><strong>Upload your CSV</strong><small>Timestamp column is detected automatically</small></button>
             </div>
           ) : (
-            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><span className="sort-badge">STANDARD TIME ↑</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => changeTimestampColumn(Number(event.target.value))}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><span className={`autosave-status is-${autosaveStatus}`} role="status">{AUTOSAVE_COPY[autosaveStatus]}</span><span className="sort-badge">STANDARD TIME ↑</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button type="button" onClick={discardSavedEdits} disabled={!Object.keys(timestampOverrides).length && autosaveStatus !== "retained"}>Discard edits</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
             <div className="video-clock-bar"><label>VIDEO START ISO<input type="text" value={videoStartText} onChange={(event) => setVideoStartText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyVideoStartText(); }} placeholder="2026-08-17T14:23:06.881Z" /></label><button type="button" onClick={applyVideoStartText}>Apply standard time</button><span>{videoStartSeconds !== null ? `Current video frame: ${formatIso(videoStartSeconds + currentTime)}` : "Enter the recording's standard start time"}</span></div>
             {activeRecord && activeRecord.seconds !== null ? (
               <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
@@ -324,7 +435,7 @@ export default function Home() {
               {sortedRecords.map((record, sortedIndex) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number" title={`Original CSV row ${record.id + 1}`}>{String(sortedIndex + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit sorted row ${sortedIndex + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
             </tbody></table></div></>
           )}
-          <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
+          <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; void loadCsv(file); }} />
         </article>
       </section>
 
