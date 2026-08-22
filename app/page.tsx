@@ -3,8 +3,10 @@
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type CsvRecord = { id: number; values: string[]; seconds: number | null };
+type DecisionValue = "accept" | "reject";
 
 const TIMESTAMP_HINTS = ["timestamp", "time_stamp", "video_time", "video timestamp", "elapsed", "elapsed_time", "start_time", "start", "time", "seconds", "sec"];
+const DECISION_HINTS = ["decision", "review_decision", "accept_reject", "status", "label", "result", "judgement", "judgment"];
 
 function splitCsvLine(line: string, delimiter: string) {
   const cells: string[] = [];
@@ -91,6 +93,22 @@ function findTimestampColumn(headers: string[]) {
   return partial >= 0 ? partial : 0;
 }
 
+function normalizeDecision(value: string): DecisionValue | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "accept" || normalized === "accepted") return "accept";
+  if (normalized === "reject" || normalized === "rejected") return "reject";
+  return null;
+}
+
+function findDecisionColumn(headers: string[], rows: string[][]) {
+  const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
+  for (const hint of DECISION_HINTS) {
+    const exact = normalizedHeaders.indexOf(hint);
+    if (exact >= 0) return exact;
+  }
+  return headers.findIndex((_, columnIndex) => rows.some((row) => normalizeDecision(row[columnIndex] ?? "") !== null));
+}
+
 function quoteCsv(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
 }
@@ -108,8 +126,10 @@ export default function Home() {
   const [rawRows, setRawRows] = useState<string[][]>([]);
   const [csvName, setCsvName] = useState("");
   const [timestampColumn, setTimestampColumn] = useState(0);
+  const [decisionColumn, setDecisionColumn] = useState(0);
   const [activeRow, setActiveRow] = useState<number | null>(null);
   const [timestampOverrides, setTimestampOverrides] = useState<Record<number, number>>({});
+  const [decisionOverrides, setDecisionOverrides] = useState<Record<number, DecisionValue>>({});
   const [videoStartSeconds, setVideoStartSeconds] = useState<number | null>(null);
   const [videoStartText, setVideoStartText] = useState("");
   const [videoStartSource, setVideoStartSource] = useState<"none" | "auto" | "manual">("none");
@@ -135,6 +155,7 @@ export default function Home() {
   }), [records]);
   const validRecordCount = records.filter((record) => record.seconds !== null).length;
   const activeRecord = activeRow === null ? null : records[activeRow] ?? null;
+  const activeDecision = activeRow === null ? null : decisionOverrides[activeRow] ?? normalizeDecision(rawRows[activeRow]?.[decisionColumn] ?? "");
   const activeRank = activeRow === null ? 0 : sortedRecords.findIndex((record) => record.id === activeRow) + 1;
   const editorMinimum = videoStartSeconds ?? activeRecord?.seconds ?? 0;
   const editorMaximum = videoStartSeconds !== null ? videoStartSeconds + Math.max(duration, 1) : Math.max(...records.map((record) => record.seconds ?? 0), 1);
@@ -166,17 +187,26 @@ export default function Home() {
   const loadCsv = async (file?: File) => {
     if (!file) return;
     const parsed = parseCsv(await file.text());
-    setHeaders(parsed.headers); setRawRows(parsed.rows); setTimestampColumn(findTimestampColumn(parsed.headers)); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
+    const detectedDecisionColumn = findDecisionColumn(parsed.headers, parsed.rows);
+    const nextHeaders = [...parsed.headers];
+    const nextRows = parsed.rows.map((row) => [...row]);
+    const nextDecisionColumn = detectedDecisionColumn >= 0 ? detectedDecisionColumn : nextHeaders.length;
+    if (detectedDecisionColumn < 0) {
+      nextHeaders.push("review_decision");
+      nextRows.forEach((row) => row.push(""));
+    }
+    setHeaders(nextHeaders); setRawRows(nextRows); setTimestampColumn(findTimestampColumn(nextHeaders)); setDecisionColumn(nextDecisionColumn); setCsvName(file.name); setActiveRow(null); setTimestampOverrides({}); setDecisionOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
   };
 
   const jumpTo = (record: CsvRecord) => {
     if (record.seconds === null || !videoRef.current) return;
+    const standardSeconds = record.seconds;
     setActiveRow(record.id);
     if (videoStartSeconds === null) {
       setSeekNotice("Set the Video Start ISO before jumping");
       return;
     }
-    const videoSeconds = record.seconds - videoStartSeconds;
+    const videoSeconds = standardSeconds - videoStartSeconds;
     if (videoSeconds < 0 || (duration > 0 && videoSeconds > duration)) {
       setSeekNotice(`Row ${record.id + 1} is outside this video · adjust Video Start ISO`);
       return;
@@ -186,7 +216,7 @@ export default function Home() {
     const applySeek = () => {
       video.currentTime = target;
       setCurrentTime(target);
-      setSeekNotice(`Jumped to ${formatIso(record.seconds)} · row ${record.id + 1}`);
+      setSeekNotice(`Jumped to ${formatIso(standardSeconds)} · row ${record.id + 1}`);
       video.focus();
     };
     if (video.readyState === 0) video.addEventListener("loadedmetadata", applySeek, { once: true });
@@ -244,12 +274,17 @@ export default function Home() {
     });
   };
 
+  const updateDecision = (rowId: number, decision: DecisionValue) => {
+    setDecisionOverrides((current) => ({ ...current, [rowId]: decision }));
+    setActiveRow(rowId);
+  };
+
   const exportCsv = () => {
-    const rows = sortedRecords.map((record) => rawRows[record.id].map((cell, columnId) =>
-      columnId === timestampColumn && timestampOverrides[record.id] !== undefined
-        ? formatIso(timestampOverrides[record.id])
-        : cell,
-    ));
+    const rows = sortedRecords.map((record) => rawRows[record.id].map((cell, columnId) => {
+      if (columnId === timestampColumn && timestampOverrides[record.id] !== undefined) return formatIso(timestampOverrides[record.id]);
+      if (columnId === decisionColumn && decisionOverrides[record.id] !== undefined) return decisionOverrides[record.id];
+      return cell;
+    }));
     const content = [headers, ...rows].map((row) => row.map((cell) => quoteCsv(cell ?? "")).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
@@ -266,7 +301,7 @@ export default function Home() {
   };
 
   const resetAll = () => {
-    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
+    setVideoUrl(""); setVideoName(""); setVideoSize(0); setHeaders([]); setRawRows([]); setCsvName(""); setCurrentTime(0); setDuration(0); setActiveRow(null); setTimestampOverrides({}); setDecisionOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); setSeekNotice("");
   };
 
   return (
@@ -300,11 +335,12 @@ export default function Home() {
               <button type="button" onClick={() => csvInputRef.current?.click()}><span className="upload-symbol">↥</span><strong>Upload your CSV</strong><small>Timestamp column is detected automatically</small></button>
             </div>
           ) : (
-            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><span className="sort-badge">STANDARD TIME ↑</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
+            <><div className="data-toolbar"><label>TIMESTAMP COLUMN<select value={timestampColumn} onChange={(event) => { setTimestampColumn(Number(event.target.value)); setActiveRow(null); setTimestampOverrides({}); setVideoStartSeconds(null); setVideoStartText(""); setVideoStartSource("none"); }}>{headers.map((header, index) => <option value={index} key={`${header}-${index}`}>{header}</option>)}</select></label><label>DECISION COLUMN<select value={decisionColumn} onChange={(event) => { setDecisionColumn(Number(event.target.value)); setDecisionOverrides({}); }}>{headers.map((header, index) => <option value={index} key={`decision-${header}-${index}`}>{header}</option>)}</select></label><span className={`alignment-badge ${videoStartSource !== "none" ? "is-aligned" : ""}`}>{videoStartSource === "auto" ? "AUTO VIDEO START" : videoStartSource === "manual" ? "MANUAL VIDEO START" : "START TIME REQUIRED"}</span><span className="sort-badge">STANDARD TIME ↑</span><div className="toolbar-actions"><button type="button" onClick={() => csvInputRef.current?.click()}>Replace CSV</button><button className="export-button" type="button" onClick={exportCsv}>Export edited CSV</button></div></div>
             <div className="video-clock-bar"><label>VIDEO START ISO<input type="text" value={videoStartText} onChange={(event) => setVideoStartText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyVideoStartText(); }} placeholder="2026-08-17T14:23:06.881Z" /></label><button type="button" onClick={applyVideoStartText}>Apply standard time</button><span>{videoStartSeconds !== null ? `Current video frame: ${formatIso(videoStartSeconds + currentTime)}` : "Enter the recording's standard start time"}</span></div>
             {activeRecord && activeRecord.seconds !== null ? (
               <section className="timestamp-editor" aria-label={`Edit timestamp for row ${activeRecord.id + 1}`}>
                 <div className="editor-heading"><div><span>EDIT SORTED ROW {String(activeRank).padStart(2, "0")}</span><strong>{timestampOverrides[activeRecord.id] !== undefined ? "Modified standard timestamp" : "Standard timestamp editor"}</strong></div><div className="editor-output"><output>{formatIso(activeRecord.seconds)}</output><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(activeRecord.seconds - videoStartSeconds) : "—"}</small></div></div>
+                <div className="decision-editor"><span>REVIEW DECISION</span><div className="decision-buttons"><button className={activeDecision === "accept" ? "is-accept" : ""} type="button" onClick={() => updateDecision(activeRecord.id, "accept")} aria-pressed={activeDecision === "accept"}>✓ Accept</button><button className={activeDecision === "reject" ? "is-reject" : ""} type="button" onClick={() => updateDecision(activeRecord.id, "reject")} aria-pressed={activeDecision === "reject"}>× Reject</button></div></div>
                 <input className="time-slider" type="range" min={editorMinimum} max={editorMaximum} step="0.001" value={activeRecord.seconds} onChange={(event) => updateTimestamp(activeRecord.id, Number(event.target.value))} aria-label="Standard timestamp position" disabled={videoStartSeconds === null} />
                 <div className="editor-controls">
                   <div className="nudge-buttons" aria-label="Fine timestamp adjustment">
@@ -320,8 +356,11 @@ export default function Home() {
                 </div>
               </section>
             ) : <div className="editor-placeholder">Click <b>✎</b> beside a timestamp to edit it with a slider and fine controls.</div>}
-            <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : ""}>{header}</th>)}</tr></thead><tbody>
-              {sortedRecords.map((record, sortedIndex) => <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number" title={`Original CSV row ${record.id + 1}`}>{String(sortedIndex + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit sorted row ${sortedIndex + 1}`} title="Edit standard timestamp">✎</button></div> : (record.values[index] || "—")}</td>)}</tr>)}
+            <div className="table-wrap"><table><thead><tr><th>#</th>{headers.map((header, index) => <th key={`${header}-${index}`} className={index === timestampColumn ? "time-column" : index === decisionColumn ? "decision-column" : ""}>{header}</th>)}</tr></thead><tbody>
+              {sortedRecords.map((record, sortedIndex) => {
+                const decision = decisionOverrides[record.id] ?? normalizeDecision(record.values[decisionColumn] ?? "");
+                return <tr key={record.id} className={`${activeRow === record.id ? "is-active" : ""} ${timestampOverrides[record.id] !== undefined || decisionOverrides[record.id] !== undefined ? "is-modified" : ""}`}><td className="row-number" title={`Original CSV row ${record.id + 1}`}>{String(sortedIndex + 1).padStart(2, "0")}</td>{headers.map((_, index) => <td key={index} className={index === timestampColumn ? "time-column" : index === decisionColumn ? "decision-column" : ""}>{index === timestampColumn && record.seconds !== null ? <div className="timestamp-cell"><button className="timestamp-button" type="button" onClick={() => jumpTo(record)} disabled={!videoUrl || videoStartSeconds === null} title={videoUrl ? `Jump video to ${formatIso(record.seconds)}` : "Upload a video first"}><span className="play-dot">▶</span><span className="timestamp-copy"><strong>{timestampOverrides[record.id] !== undefined ? formatIso(record.seconds) : (record.values[index] || formatIso(record.seconds))}</strong><small>VIDEO {videoStartSeconds !== null ? formatVideoTime(record.seconds - videoStartSeconds) : "—"}</small></span></button><button className="edit-time-button" type="button" onClick={() => { setActiveRow(record.id); if (videoUrl) jumpTo(record); }} aria-label={`Edit sorted row ${sortedIndex + 1}`} title="Edit standard timestamp">✎</button></div> : index === decisionColumn ? <div className="row-decision-buttons" aria-label={`Decision for sorted row ${sortedIndex + 1}`}><button className={decision === "accept" ? "is-accept" : ""} type="button" onClick={() => updateDecision(record.id, "accept")} aria-pressed={decision === "accept"}>Accept</button><button className={decision === "reject" ? "is-reject" : ""} type="button" onClick={() => updateDecision(record.id, "reject")} aria-pressed={decision === "reject"}>Reject</button></div> : (record.values[index] || "—")}</td>)}</tr>;
+              })}
             </tbody></table></div></>
           )}
           <input ref={csvInputRef} className="visually-hidden" type="file" accept=".csv,text/csv,text/plain" onChange={(event) => void loadCsv(event.target.files?.[0])} />
