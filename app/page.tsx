@@ -231,8 +231,12 @@ export default function Home() {
   const loadVideo = (file?: File) => {
     if (!file || !file.type.startsWith("video/")) return;
     setVideoUrl((current) => { if (current) URL.revokeObjectURL(current); return URL.createObjectURL(file); });
-    setDuration(0); setFrameReady(false); setVideoKey(`${file.name}:${file.size}:${file.lastModified}`);
-    setVideoName(file.name); setVideoSize(file.size); setCurrentTime(0); setActiveRow((current) => current === selectedEndRow ? current : null); setVideoStartSource("none"); setSeekNotice("");
+    const nextKey = `${file.name}:${file.size}:${file.lastModified}`;
+    const savedCaptures = Object.values(captureInfo).filter((info) => info.videoKey === nextKey);
+    const savedStart = savedCaptures.length && savedCaptures.every((info) => Math.abs(info.startSeconds - savedCaptures[0].startSeconds) <= 0.0005) ? savedCaptures[0].startSeconds : null;
+    setDuration(0); setFrameReady(false); setVideoKey(nextKey);
+    setVideoStartSeconds(savedStart); setVideoStartText(savedStart === null ? "" : formatIso(savedStart));
+    setVideoName(file.name); setVideoSize(file.size); setCurrentTime(0); setActiveRow((current) => current === selectedEndRow ? current : null); setVideoStartSource(savedStart === null ? "none" : "manual"); setSeekNotice("");
   };
 
   const syncVideoFrame = (video: HTMLVideoElement) => {
@@ -309,10 +313,18 @@ export default function Home() {
     else applySeek();
   };
 
+  const flagChangedRecordingClock = (start: number) => {
+    setCaptureInfo((current) => Object.fromEntries(Object.entries(current).map(([id, info]) => [id,
+      info.videoKey === videoKey && Math.abs(info.startSeconds - start) > 0.0005
+        ? { ...info, needsReview: true } : info,
+    ])));
+  };
+
   const alignAllToCurrentTime = (rowId: number) => {
     const standardSeconds = records.find((record) => record.id === rowId)?.seconds;
     if (standardSeconds === null || standardSeconds === undefined) return;
     const start = standardSeconds - (videoRef.current?.currentTime ?? currentTime);
+    flagChangedRecordingClock(start);
     setVideoStartSeconds(start);
     setVideoStartText(formatIso(start));
     setVideoStartSource("manual");
@@ -347,6 +359,7 @@ export default function Home() {
       setSeekNotice("Video Start ISO is invalid");
       return;
     }
+    flagChangedRecordingClock(parsed);
     setVideoStartSeconds(parsed);
     setVideoStartText(formatIso(parsed));
     setVideoStartSource("manual");
@@ -401,7 +414,7 @@ export default function Home() {
   const activeValidation = activeMarker ? validateMarker(activeMarker, records, headers, excludedRows) : { errors: [], warnings: [] };
   const captureNeedsReview = (id: number) => {
     const info = captureInfo[id];
-    return !!info && (info.needsReview || (!!videoKey && videoKey !== info.videoKey) || (videoStartSeconds !== null && Math.abs(info.startSeconds - videoStartSeconds) > 0.0005));
+    return !!info?.needsReview;
   };
   const exportIssues = markerExportErrors(records, headers, excludedRows);
   const alignmentIssues = records.filter((row) => isFirstAction(row, headers) && !excludedRows[row.id] && captureNeedsReview(row.id));
@@ -541,7 +554,7 @@ export default function Home() {
               <div className="first-action-buttons"><button className="capture-button" type="button" disabled={!selectedEnd || !!endSourceIssue || !hasCalibratedVideo || !frameReady} onClick={recordFirstAction}>{activeMarker ? "Update from video" : "Record first action"}</button>{activeMarker && <><button type="button" disabled={!videoUrl || videoStartSeconds === null} onClick={() => jumpTo(activeMarker)}>Go to first action</button><button type="button" onClick={() => removeMarker(activeMarker.id)}>Remove first action</button></>}</div>
               {activeValidation.errors.map((issue, i) => <p className="error-text" key={`error-${i}`}>{issue}</p>)}
               {activeValidation.warnings.map((issue, i) => <p className="warning-text" key={`warning-${i}`}>{issue}</p>)}
-              {activeMarker && captureNeedsReview(activeMarker.id) && <div className="capture-review"><p>The video or clock changed since capture. Review the frame before exporting.</p><button type="button" disabled={!hasCalibratedVideo || captureInfo[activeMarker.id]?.videoKey !== videoKey} onClick={() => updateTimestamp(activeMarker.id, videoStartSeconds! + captureInfo[activeMarker.id].videoSeconds)}>Recalculate from captured frame</button><button type="button" disabled={!hasCalibratedVideo || activeMarker.seconds === null} onClick={() => updateTimestamp(activeMarker.id, activeMarker.seconds!)}>Keep ISO time after review</button></div>}
+              {activeMarker && captureNeedsReview(activeMarker.id) && <div className="capture-review"><p>The video or clock changed since capture. Review the frame before exporting.</p><button type="button" disabled={!hasCalibratedVideo || captureInfo[activeMarker.id]?.videoKey !== videoKey} onClick={() => updateTimestamp(activeMarker.id, videoStartSeconds! + captureInfo[activeMarker.id].videoSeconds)}>Recalculate from captured frame</button><button type="button" disabled={!hasCalibratedVideo || captureInfo[activeMarker.id]?.videoKey !== videoKey || activeMarker.seconds === null} onClick={() => updateTimestamp(activeMarker.id, activeMarker.seconds!)}>Keep ISO time after review</button></div>}
             </section>
           {headers.length > 0 && <>
             {activeRecord && activeRecord.seconds !== null ? (

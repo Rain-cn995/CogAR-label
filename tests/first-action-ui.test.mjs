@@ -139,8 +139,26 @@ test("component handlers record only from the selected audio end, preserve legac
     await edit(rowAt(14));
     assert.equal(capture().props.disabled, false, "imported correct classification does not gate capture");
 
+    const replaceVideo = async (name) => {
+      await app.act(() => find((node) => node.type === "input" && node.props.accept === "video/*").props.onChange({ target: { files: [{ name, size: 100, lastModified: 1, type: "video/mp4" }] } }));
+      find((node) => node.type === "video").props.ref.current = video;
+      await mediaEvent("onLoadedData");
+    };
+    await replaceVideo("P11-shelf.mp4");
+    await setClock(iso(100));
+    await click("Export edited CSV");
+    assert.equal(downloads.length, 1, "switching to shelf preserves the boba capture");
+    downloads.length = 0;
+    await replaceVideo("test.mp4");
+    assert.equal(find((node) => node.props.placeholder === "2026-08-17T14:23:06.881Z").props.value, iso(0));
     await edit(sugarMarker());
     await setClock(iso(1));
+    await replaceVideo("P11-shelf.mp4");
+    await click("Export edited CSV");
+    assert.equal(downloads.length, 0, "a genuine boba clock change remains flagged after switching away");
+    await replaceVideo("test.mp4");
+    await setClock(iso(1));
+    await edit(sugarMarker());
     await click("Export edited CSV");
     assert.equal(downloads.length, 0);
     assert.match(notice(), /clock/);
