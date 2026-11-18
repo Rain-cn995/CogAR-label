@@ -6,6 +6,8 @@ export const column = (headers, name) => headers.findIndex((header) => normalize
 export const cell = (record, headers, name) => record?.values[column(headers, name)] ?? "";
 export const isFirstAction = (record, headers) => normalize(cell(record, headers, "action")) === "first action";
 export const isAiAudio = (record, headers) => normalize(cell(record, headers, "action")) === "ai audio";
+export const isAiAudioEnd = (record, headers) => normalize(cell(record, headers, "action")) === "ai audio end";
+export const isAiCue = (record, headers) => isAiAudio(record, headers) || isAiAudioEnd(record, headers);
 export const eventId = (record, headers) => cell(record, headers, "event_id");
 export const trialId = (record, headers) => cell(record, headers, "trial_id");
 function contextKey(record, headers) {
@@ -52,7 +54,7 @@ export function prepareRows(inputHeaders, inputRows, namespace) {
     const rawStep = read("step").trim();
     const step = rawStep && Number.isFinite(Number(rawStep)) ? String(Number(rawStep)) : rawStep;
     const key = JSON.stringify([scope, sessions.get(scope) ?? 0, step]);
-    if (action === "ai audio" && finished.has(key)) {
+    if ((action === "ai audio" || action === "ai audio end") && finished.has(key)) {
       occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
       finished.delete(key);
     }
@@ -82,24 +84,29 @@ export function correctness(source, records, headers) {
 }
 
 export function sourceCandidates(record, records, headers) {
-  return records.filter((row) => isAiAudio(row, headers) && sameTrial(row, record, headers));
+  return records.filter((row) => isAiCue(row, headers) && sameTrial(row, record, headers));
 }
 
 export function sourceFor(marker, records, headers) {
   const linked = cell(marker, headers, "source_ai_event_id");
-  const matches = records.filter((row) => eventId(row, headers) === linked && isAiAudio(row, headers));
+  if (!linked) return null;
+  const matches = records.filter((row) => eventId(row, headers) === linked && isAiCue(row, headers));
   return matches.length === 1 ? matches[0] : null;
 }
 
 export function sourceIssues(source, records, headers, excluded = {}) {
-  if (!source || !isAiAudio(source, headers)) return ["Select an original AI audio event."];
+  if (!isAiCue(source, headers)) return ["Select an original AI audio cue."];
+  const isEnd = isAiAudioEnd(source, headers);
   const issues = [];
   if (!trialId(source, headers)) issues.push("Task and step are missing; this cue cannot be assigned to a trial.");
-  if (!validSeconds(source.seconds)) issues.push("The AI onset timestamp is invalid.");
+  if (!validSeconds(source.seconds)) issues.push(isEnd ? "The AI audio end timestamp is invalid." : "The AI onset timestamp is invalid.");
+  if (!eventId(source, headers)) issues.push("The source AI cue has no event ID.");
   if (records.filter((r) => eventId(r, headers) === eventId(source, headers)).length !== 1) issues.push("Duplicate source event ID; repair the CSV IDs before annotating.");
-  if (excluded[source.id]) issues.push("The source AI audio is excluded from export.");
-  if (correctness(source, records, headers).value !== "wrong") issues.push("Confirm that the AI suggestion is wrong before recording.");
-  if (sourceCandidates(source, records, headers).length > 1 && cell(source, headers, "first_action_source_selected") !== "true") issues.push("Multiple AI cues in this trial. Choose the intended original cue explicitly.");
+  if (excluded[source.id]) issues.push("The source AI cue is excluded from export.");
+  if (!isEnd) {
+    if (correctness(source, records, headers).value !== "wrong") issues.push("This onset-linked marker requires a source classified as an AI-wrong suggestion.");
+    if (sourceCandidates(source, records, headers).filter((row) => isAiAudio(row, headers)).length > 1 && cell(source, headers, "first_action_source_selected") !== "true") issues.push("Multiple AI cues in this trial. Choose the intended original cue explicitly.");
+  }
   return issues;
 }
 
@@ -110,13 +117,16 @@ export function validateMarker(marker, records, headers, excluded = {}) {
   if (!validSeconds(marker.seconds)) errors.push("First action timestamp is invalid.");
   if (source) {
     if (!sameTrial(source, marker, headers)) errors.push("First action and AI cue belong to different trials.");
-    if (validSeconds(marker.seconds) && validSeconds(source.seconds) && marker.seconds < source.seconds) errors.push("First action is before AI onset. Record a note instead of moving the timestamp to onset.");
+    if (validSeconds(marker.seconds) && validSeconds(source.seconds) && marker.seconds < source.seconds) {
+      if (isAiAudioEnd(source, headers)) warnings.push("First action is before AI audio end; elapsed time is negative.");
+      else errors.push("First action is before AI onset.");
+    }
     const duplicates = records.filter((r) => isFirstAction(r, headers) && sameTrial(r, marker, headers) && !excluded[r.id]);
     if (duplicates.length > 1) errors.push("Multiple First action markers in this trial. Remove or exclude the duplicate.");
     const participant = (row) => cell(row, headers, "sheet") || cell(row, headers, "participant_id") || cell(row, headers, "participant");
     const task = (row) => cell(row, headers, "plan_id") || cell(row, headers, "task_id") || cell(row, headers, "plan") || cell(row, headers, "task");
     const session = (row) => cell(row, headers, "session_id") || cell(row, headers, "session") || cell(row, headers, "recording_id");
-    const crossedNextCue = records.some((row) => isAiAudio(row, headers) && !sameTrial(row, source, headers) && !excluded[row.id]
+    const crossedNextCue = records.some((row) => isAiCue(row, headers) && !sameTrial(row, source, headers) && !excluded[row.id]
       && participant(row) === participant(source) && task(row) === task(source) && session(row) === session(source)
       && validSeconds(row.seconds) && row.seconds > source.seconds && row.seconds < marker.seconds);
     if (crossedNextCue) warnings.push("First action is after the next trial's AI cue; review the trial boundary.");
@@ -152,12 +162,20 @@ export function makeMarker(source, headers, timestampColumn, seconds, id, note =
   return values;
 }
 
-export function captureSeconds(video, startSeconds, verified) {
-  if (!video || !verified || !validSeconds(startSeconds)) throw new Error("Load a video and verify its clock alignment first.");
-  if (video.readyState < 2 || video.seeking) throw new Error("Wait for the video frame to finish loading or seeking.");
-  if (!Number.isFinite(video.duration) || video.duration <= 0 || !Number.isFinite(video.currentTime) || video.currentTime < 0 || video.currentTime > video.duration) throw new Error("The current frame is outside the recording.");
+export function videoFrameIssue(video) {
+  if (!video || video.error || !(video.readyState >= 2) || video.seeking) return "Wait for the video frame to finish loading or seeking.";
+  if (!Number.isFinite(video.duration) || video.duration <= 0 || !Number.isFinite(video.currentTime) || video.currentTime < 0 || video.currentTime > video.duration) return "The current frame is outside the recording.";
+  return null;
+}
+
+export function captureSeconds(video, startSeconds) {
+  if (!validSeconds(startSeconds)) throw new Error("Set a valid Video Start ISO first.");
+  const issue = videoFrameIssue(video);
+  if (issue) throw new Error(issue);
+  const seconds = Math.round((startSeconds + video.currentTime) * 1000) / 1000;
+  if (!validSeconds(seconds)) throw new Error("The current frame has an invalid standard timestamp.");
   video.pause();
-  return Math.round((startSeconds + video.currentTime) * 1000) / 1000;
+  return seconds;
 }
 
 export function markerExportErrors(records, headers, excluded) {

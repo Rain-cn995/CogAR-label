@@ -4,6 +4,12 @@ Date: November 17, 2026 (America/Chicago)
 Status: Implemented locally on `feature/first-action` on November 18, 2026. Browser smoke verification remains outstanding because this environment blocked local browser execution.
 Baseline: `main` at `c5dca0925da629eacd1fc7ea66ecbd530b551cf8`.
 
+## Current audio-end workflow
+
+The First action panel is visible before selection. Select an **AI audio end** timestamp or pencil to choose the exact source row, including when a trial contains repeated cues. Capture and re-capture require that explicit selection, a valid video start, and a loaded, seek-complete frame within the recording. Select the marker itself for manual timestamp edits. New capture uses the live playhead and links the event to the selected end by ID. An action before the end keeps its observed timestamp and displays a negative elapsed time and a warning.
+
+New end-linked markers require no correctness classification or verification checkbox. Valid prior onset links, imported metadata, and version 2 drafts remain supported. The original onset-based plan follows below for historical context. See the [current workflow in the README](../README.md#record-a-first-action) for the full steps.
+
 ## Goal
 
 Record the participant's first observable action toward a task object during an AI-wrong suggestion step. Make that timestamp available as the endpoint of the AI-audio-to-first-action analysis window, while keeping existing final-decision events available for comparison.

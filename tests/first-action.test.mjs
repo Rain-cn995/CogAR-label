@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { prepareRows, column, cell, eventId, trialId, sameTrial, correctness, sourceIssues, sourceFor, makeMarker, validateMarker, markerExportErrors, captureSeconds, serializeTimestamp, relinkMarker } from "../app/first-action.js";
+import { prepareRows, column, cell, eventId, trialId, sameTrial, correctness, sourceCandidates, sourceIssues, sourceFor, makeMarker, validateMarker, markerExportErrors, captureSeconds, serializeTimestamp, relinkMarker } from "../app/first-action.js";
 
 const epoch = Date.parse("2026-08-17T14:00:00Z") / 1000;
 const iso = (s) => new Date((epoch + s) * 1000).toISOString();
@@ -55,8 +55,8 @@ test("replays require explicit cue selection, while separate completed attempts 
 test("capture reads current media time, pauses, and checks alignment and readiness", () => {
   let paused=false;
   const video={ readyState:2,seeking:false,duration:30,currentTime:4.125,pause(){ paused=true; } };
-  assert.equal(captureSeconds(video,epoch,true),epoch+4.125); assert.ok(paused);
-  for (const [v,start,verified] of [[video,epoch,false],[{...video,seeking:true},epoch,true],[{...video,readyState:0},epoch,true],[{...video,currentTime:31},epoch,true],[video,null,true],[{...video,duration:Infinity},epoch,true]]) assert.throws(()=>captureSeconds(v,start,verified));
+  assert.equal(captureSeconds(video,epoch),epoch+4.125); assert.ok(paused);
+  for (const [v,start] of [[null,epoch],[{...video,seeking:true},epoch],[{...video,readyState:0},epoch],[{...video,currentTime:31},epoch],[{...video,currentTime:-1},epoch],[{...video,currentTime:NaN},epoch],[video,null],[{...video,duration:Infinity},epoch]]) assert.throws(()=>captureSeconds(v,start));
 });
 
 test("First action copies context only, leaves original decisions intact, and supports during-audio action", () => {
@@ -80,7 +80,21 @@ test("validation catches edited onset, duplicates, source exclusion, and later c
   assert.deepEqual(validateMarker(m,[...records,duplicate],f.headers,{[duplicate.id]:true}).errors,[]);
   f.source.values[column(f.headers,"ai_correctness")]="correct";
   f.source.values[column(f.headers,"ai_correctness_reviewed")]="true";
-  assert.match(validateMarker(m,records,f.headers).errors.join(),/suggestion is wrong/);
+  assert.match(validateMarker(m,records,f.headers).errors.join(),/source classified as an AI-wrong suggestion/);
+});
+
+test("a repeated audio end links by ID without correctness metadata and previews earlier motion", () => {
+  const repeat = ["1", "p37", "boba", "2", "Sugar", "AI audio end", iso(7)];
+  const f = fixture("", [repeat]);
+  const end = f.records[3];
+  assert.equal(correctness(end, f.records, f.headers).value, "unknown");
+  assert.deepEqual(sourceCandidates(end, f.records, f.headers).map((row) => row.id), [0, 1, 3]);
+  assert.deepEqual(sourceIssues(end, f.records, f.headers), []);
+  const marker = markerFor({ ...f, source: end }, 6.5);
+  const records = [...f.records, marker];
+  assert.equal(sourceFor(marker, records, f.headers), end);
+  assert.deepEqual(markerExportErrors(records, f.headers, {}), []);
+  assert.match(validateMarker(marker, records, f.headers).warnings.join(), /elapsed time is negative/);
 });
 
 test("after-decision timing is flagged without clamping or silently rewriting", () => {

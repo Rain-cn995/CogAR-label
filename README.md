@@ -15,48 +15,46 @@ npm run dev
 
 ## Record a first action
 
-1. Upload the recording and its event CSV. Check **VIDEO START ISO** against a known event, adjust if necessary, then check **I verified the video clock alignment**. An automatic clock estimate is not itself verification.
-2. Click the timestamp/edit button on the original **AI audio** row for the step.
-3. Check **AI suggestion**. Imported `over_rely` / `app_reject` labels identify wrong suggestions; `app_rely` / `under_rely` identify correct suggestions. Missing or conflicting metadata requires explicit review. Accept/Reject alone does not establish correctness. Selecting Wrong/Correct/Unknown explicitly overrides the inferred classification for this cue.
-4. If there are repeated AI cues in a trial, select the intended original cue and click **Use this AI cue for this trial**. Recovery audio is not an original AI cue.
-5. Play or scrub to the first observable physical movement toward a task object, then click **Record first action**. The handler pauses playback and reads the actual video position. Looking at an object alone does not qualify; movement toward either a correct or incorrect object counts. Agree on this coding rule with the research team before annotation.
-6. The app adds a **First action** event with an ISO timestamp and an elapsed-time preview measured from **AI audio onset**. Movement during audio playback is allowed. It preserves the existing final-decision event and audio-end marker.
-7. Use **Update from video**, **Go to first action**, or the existing timestamp slider/nudge controls to refine the marker. A typed ISO time takes effect through **Apply ISO** or Enter. Remove is reversible with **Undo removal**, including after draft recovery.
-8. Click **Export edited CSV** for a portable copy. Export includes the new event and its stable source link.
+1. Upload the event CSV and select the timestamp or pencil on the intended **AI audio end** row. You can select the row before loading the recording. When a trial has repeated cues, select the exact end row to use.
+2. Load the recording and check **VIDEO START ISO** against a known event. Apply a corrected start time if needed.
+3. Play or scrub to the first observable physical movement toward a task object, then click **Record first action**. Looking alone does not qualify. Movement toward either a correct or incorrect object counts.
+4. The panel shows the captured ISO timestamp and signed elapsed time from the selected **AI audio end**. An action before audio end is recorded at its observed time with a negative elapsed value and a warning.
+5. Keep the linked end row selected to **Update from video**. Select the marker itself to use the timestamp editor, including the slider, fine controls, and **Apply ISO**. Removal is reversible through **Undo removal**, including after draft recovery.
+6. Click **Export edited CSV** for a portable copy that includes the marker and its stable source link.
 
-One marker is retained per resolved trial occurrence. Known-correct cues cannot be recorded. Before-onset timestamps are rejected rather than clamped. After-decision, recovery, completion, or next-trial times produce review warnings. If no action is observable, leave it unrecorded and add an annotation note; the app never substitutes a final-decision timestamp.
+One marker is retained per resolved trial occurrence. New end-linked captures work with any AI correctness classification, including missing metadata. Selecting a different end leaves an existing marker linked to its original cue. Use **Linked AI cue** on the marker to change its source explicitly. After-decision, recovery, completion, or next-trial times produce review warnings. If no action is observable, leave it unrecorded.
 
 ## Clock changes and validation
 
-Capturing requires a loaded, seek-complete video and verified alignment. Replacing the video or changing its clock clears verification. Existing captures whose video/clock changed must be reviewed before export. **Recalculate from captured frame** preserves the observed video position under a corrected clock; **Keep ISO time after review** explicitly preserves the absolute timestamp. Recalculation is available only for the same recording.
+Capturing requires a valid video start and a loaded recording with a finite duration. The handler checks that the live frame is within the recording and has finished seeking, then pauses playback to capture it. Existing captures whose video or clock changed need review before export. **Recalculate from captured frame** preserves the observed video position under a corrected clock. **Keep ISO time after review** preserves the absolute timestamp. Recalculation is available for the same recording.
 
-Source links, duplicate IDs/markers, correctness, and timestamps are revalidated after edits, import, draft recovery, and before export. Excluding an AI source blocks export of its dependent marker until the source is included or the marker is also excluded. Inspect issues shown above the editor. Invalid original CSV IDs should be corrected in the source file.
+Source links, duplicate IDs/markers, and timestamps are revalidated after edits, import, draft recovery, and before export. Older onset-linked markers retain their source links and validation. Excluding an AI source blocks export of its dependent marker until the source is included or the marker is also excluded. Inspect issues shown above the editor.
 
 ## CSV schema
 
 The standard study schema is `participant_id`, `sheet`, `plan_id`, `plan`, `step`, `step_name`, `action`, `detail`, `event_timestamp_iso`, `review_decision`, and `reliance`. Header matching is case-insensitive. Task/session aliases are recognized by the grouping helpers. A task and step are required for First action capture.
 
-Wrong step numbers are not hardcoded. Numeric step values such as `2` and `2.0` match. Where present, `sheet` takes precedence over legacy participant IDs. Task starts and completed attempts separate repeated trials; unresolved multiple cues require explicit selection.
+Numeric step values such as `2` and `2.0` match. Where present, `sheet` takes precedence over legacy participant IDs. Task starts and completed attempts separate repeated trials.
 
 Original columns and values are retained, with timestamp/decision edits and export exclusions applied. Added metadata columns are hidden in the table by default; enable **Show annotation metadata** to inspect them:
 
 | Column | Purpose |
 | --- | --- |
 | `event_id` | Stable identity, retained on re-import |
-| `source_ai_event_id` | Links a First action event to its original AI cue |
+| `source_ai_event_id` | Links a First action event to the selected AI audio end or its legacy AI audio onset |
 | `trial_id` | Stable trial occurrence, protected against participant/task mismatches |
-| `ai_correctness` | Explicit Wrong/Correct/Unknown classification on the source cue |
-| `ai_correctness_reviewed` | Records that a coder explicitly resolved correctness |
-| `first_action_source_selected` | Records an explicit choice among repeated cues |
-| `annotation_note` | Optional observation or reason an action remains unrecorded |
+| `ai_correctness` | Preserved correctness classification on the source cue |
+| `ai_correctness_reviewed` | Preserved record of a coder resolving correctness |
+| `first_action_source_selected` | Explicit choice among repeated onset cues for legacy markers |
+| `annotation_note` | Preserved observation or reason an action remained unrecorded |
 
-Generated rows copy identity/task context only. They leave final-decision, reliance, and old derived gap columns blank. Numeric timestamp columns retain their units. Millisecond formatting does not imply millisecond observation accuracy. Older First action rows without links can be explicitly linked using **Linked AI audio**.
+Generated rows copy identity/task context only. They leave final-decision, reliance, and old derived gap columns blank. Numeric timestamp columns retain their units. Millisecond formatting does not imply millisecond observation accuracy. Older First action rows without links can be explicitly linked using **Linked AI cue**.
 
-Downstream analysis must join the First action row to `source_ai_event_id` and use that timestamp as the window endpoint. This feature does not automatically change the separate eye-gaze analysis pipeline.
+Downstream analysis can join `source_ai_event_id` to the linked cue's `event_id` for the window start and use the First action timestamp for the endpoint.
 
 ## Draft recovery
 
-Review changes are saved on this device in a versioned browser local-storage draft keyed by the original CSV's contents. Reopen the same CSV to restore annotations, notes, links, classifications, timestamp/decision edits, exclusions, removals, and video-clock information. Select the video again and verify alignment before recording. Files themselves are not stored in the draft.
+Review changes are saved on this device in a versioned browser local-storage draft keyed by the original CSV's contents. Reopen the same CSV to restore annotations, imported metadata, links, timestamp/decision edits, exclusions, removals, and video-clock information. Load the video again before recording. Files themselves are not stored in the draft.
 
 Export remains the portable record. A storage error is displayed rather than reported as success. The app warns before leaving/replacing/resetting when saving fails. A malformed saved draft is left intact; the original CSV opens with draft saving disabled to avoid overwriting recoverable data. Export the new review before leaving in that case. Browser storage can be cleared externally, so retain exported CSVs.
 
